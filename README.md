@@ -3,7 +3,7 @@
 
 https://github.com/user-attachments/assets/be5dfa1d-ac6e-4c43-a812-d44799690244
 
-Requires cupy, currently tested only with `cupy-cuda12==13.3.0`
+GPU inference uses cupy (`cupy-cuda12x>=13.3.0`). CPU inference does not need cupy.
 
 Original repository:
 

@@ -159,7 +159,8 @@ class GIMMVFI_interpolate:
         mm.soft_empty_cache()
         images = images.permute(0, 3, 1, 2)
         torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()

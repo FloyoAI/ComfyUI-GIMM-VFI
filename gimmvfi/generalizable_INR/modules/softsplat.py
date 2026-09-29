@@ -9,11 +9,15 @@
 # --------------------------------------------------------
 
 import collections
-import cupy
 import os
 import re
 import torch
 import typing
+
+try:
+    import cupy
+except ImportError:
+    cupy = None
 
 
 ##########################################################
@@ -260,7 +264,6 @@ def cuda_kernel(strFunction: str, strKernel: str, objVariables: typing.Dict):
 # end
 
 
-@cupy.memoize(for_each_device=True)
 @torch.compiler.disable()
 def cuda_launch(strKey: str):
     try:
@@ -280,6 +283,46 @@ def cuda_launch(strKey: str):
         ),
     ).get_function(strFunction)
 
+
+if cupy is not None:
+    cuda_launch = cupy.memoize(for_each_device=True)(cuda_launch)
+
+
+def _softsplat_cpu(tenIn, tenFlow):
+    """Bilinear splat matching the CUDA softsplat_out kernel."""
+    B, C, H, W = tenIn.shape
+    tenOut = tenIn.new_zeros(B, C, H, W)
+    if H == 0 or W == 0:
+        return tenOut
+
+    flow = tenFlow.to(dtype=tenIn.dtype)
+    ys = torch.arange(H, device=tenIn.device, dtype=tenIn.dtype).view(1, H, 1)
+    xs = torch.arange(W, device=tenIn.device, dtype=tenIn.dtype).view(1, 1, W)
+    fltX = xs + flow[:, 0]
+    fltY = ys + flow[:, 1]
+    finite = torch.isfinite(fltX) & torch.isfinite(fltY)
+
+    nw_x = torch.floor(fltX)
+    nw_y = torch.floor(fltY)
+    corners = (
+        (nw_x, nw_y, (nw_x + 1 - fltX) * (nw_y + 1 - fltY)),
+        (nw_x + 1, nw_y, (fltX - nw_x) * (nw_y + 1 - fltY)),
+        (nw_x, nw_y + 1, (nw_x + 1 - fltX) * (fltY - nw_y)),
+        (nw_x + 1, nw_y + 1, (fltX - nw_x) * (fltY - nw_y)),
+    )
+
+    tenOut_flat = tenOut.view(B, C, H * W)
+    for ix, iy, weight in corners:
+        inside = finite & (ix >= 0) & (ix < W) & (iy >= 0) & (iy < H)
+        zeros = torch.zeros_like(ix)
+        ix_i = torch.where(inside, ix, zeros).clamp(0, max(W - 1, 0)).long()
+        iy_i = torch.where(inside, iy, zeros).clamp(0, max(H - 1, 0)).long()
+        weight = torch.where(inside, weight, zeros)
+        idx = (iy_i * W + ix_i).view(B, 1, H * W).expand(B, C, H * W)
+        contrib = (tenIn * weight.unsqueeze(1)).reshape(B, C, H * W)
+        tenOut_flat.scatter_add_(2, idx, contrib)
+
+    return tenOut
 
 
 ##########################################################
@@ -367,6 +410,10 @@ class softsplat_func(torch.autograd.Function):
         )
 
         if tenIn.is_cuda == True:
+            if cupy is None:
+                raise RuntimeError(
+                    "cupy is required for CUDA softsplat. Install cupy-cuda12x on GPU hosts."
+                )
             cuda_launch(
                 cuda_kernel(
                     "softsplat_out",
@@ -440,7 +487,7 @@ class softsplat_func(torch.autograd.Function):
             )
 
         elif tenIn.is_cuda != True:
-            assert False
+            tenOut = _softsplat_cpu(tenIn, tenFlow)
 
         # end
 
